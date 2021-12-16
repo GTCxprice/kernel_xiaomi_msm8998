@@ -1570,9 +1570,24 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_pi_state *pi_
 	}
 
 	/*
-	 * We pass it to the next owner. The WAITERS bit is always kept
-	 * enabled while there is PI state around. We cleanup the owner
-	 * died bit, because we are the owner.
+	 * When we interleave with futex_lock_pi() where it does
+	 * rt_mutex_timed_futex_lock(), we might observe @this futex_q waiter,
+	 * but the rt_mutex's wait_list can be empty (either still, or again,
+	 * depending on which side we land).
+	 *
+	 * When this happens, give up our locks and try again, giving the
+	 * futex_lock_pi() instance time to complete, either by waiting on the
+	 * rtmutex or removing itself from the futex queue.
+	 */
+	if (!new_owner) {
+		raw_spin_unlock_irq(&pi_state->pi_mutex.wait_lock);
+		return -EAGAIN;
+	}
+
+	/*
+	 * We pass it to the next owner. The WAITERS bit is always
+	 * kept enabled while there is PI state around. We cleanup the
+	 * owner died bit, because we are the owner.
 	 */
 	newval = FUTEX_WAITERS | task_pid_vnr(new_owner);
 
@@ -2429,11 +2444,6 @@ retry:
 			 * already fixed up. Nothing to do.
 			 */
 			return 0;
-		}
-
-		if (__rt_mutex_futex_trylock(&pi_state->pi_mutex)) {
-			/* We got the lock. pi_state is correct. Tell caller */
-			return 1;
 		}
 
 		/*
